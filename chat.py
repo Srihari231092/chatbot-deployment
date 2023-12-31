@@ -1,51 +1,73 @@
 import random
 import json
 
-import torch
+import pandas as pd
+import duckdb
+import openai
+import time 
+import os
 
-from model import NeuralNet
-from nltk_utils import bag_of_words, tokenize
+from openai import OpenAI
+import duckdb
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+bot_name = "Vegan-punk"
 
-with open('intents.json', 'r') as json_data:
-    intents = json.load(json_data)
+path = "./data/titanic"
+files = [x for x in os.listdir(path = path) if ".csv" in x]
+data = pd.concat((pd.read_csv(path +"/" + f) for f in files), ignore_index=True)
+data.columns = [c.strip().replace(" ", "_").lower() for c in data.columns]
 
-FILE = "data.pth"
-data = torch.load(FILE)
 
-input_size = data["input_size"]
-hidden_size = data["hidden_size"]
-output_size = data["output_size"]
-all_words = data['all_words']
-tags = data['tags']
-model_state = data["model_state"]
+prompt_template = """
 
-model = NeuralNet(input_size, hidden_size, output_size).to(device)
-model.load_state_dict(model_state)
-model.eval()
+Given the following SQL table, your job is to write queries given a user’s request, giving only code, no explanantion, and ending the query with a semicolon. \n
 
-bot_name = "Sam"
+CREATE TABLE {} ({}) \n
+
+Write a SQL query that returns - {}
+"""
+
+def sql_prompt_generator(table_name, col_names, query):
+    prompt = prompt_template.format(table_name, col_names, query)
+    return prompt
+table = "data"
+col_names = str(list(data.columns)).replace('[', '').replace(']', '')
+query = "How many passengers were there?"
+
+client = OpenAI(
+    # This is the default and can be omitted
+    api_key=os.environ.get("OPENAI_API_KEY"),
+)
+openai_api_models = pd.DataFrame(client.models.list().data)
+
 
 def get_response(msg):
-    sentence = tokenize(msg)
-    X = bag_of_words(sentence, all_words)
-    X = X.reshape(1, X.shape[0])
-    X = torch.from_numpy(X).to(device)
-
-    output = model(X)
-    _, predicted = torch.max(output, dim=1)
-
-    tag = tags[predicted.item()]
-
-    probs = torch.softmax(output, dim=1)
-    prob = probs[0][predicted.item()]
-    if prob.item() > 0.75:
-        for intent in intents['intents']:
-            if tag == intent["tag"]:
-                return random.choice(intent['responses'])
     
-    return "I do not understand..."
+    try:
+        # msg = "How many passengers were there?"
+        prompt = sql_prompt_generator(table_name = table, col_names = col_names, query = msg)
+        model="gpt-4-1106-preview"
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+        )
+
+        response_text = response.choices[0].message.content
+        startidtoken = "```sql"
+        endidtoken = ";"
+        sqlkey_select_loc = response_text.find(startidtoken)+len(startidtoken)
+        sqlkey_semicolon_loc = response_text.find(endidtoken)
+        query = response_text[sqlkey_select_loc:sqlkey_semicolon_loc]
+    except Exception as e:
+        print(e)
+        return prompt
+    
+    return query
 
 
 if __name__ == "__main__":
